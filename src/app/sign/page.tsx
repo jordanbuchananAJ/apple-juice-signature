@@ -7,25 +7,28 @@ export default function SignPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const padRef = useRef<SignaturePad | null>(null);
 
-  const [wo, setWo] = useState<string>("");
-  const [name, setName] = useState<string>("");
-  const [consent, setConsent] = useState<boolean>(false);
+  const [wo, setWo] = useState("");
+  const [name, setName] = useState("");
+  const [consent, setConsent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  // Pull ?wo=123 from the URL on first render
+  // read ?wo= from URL once
   useEffect(() => {
     const u = new URL(window.location.href);
     const id = u.searchParams.get("wo") ?? "";
     if (id) setWo(id);
   }, []);
 
-  // Initialize and keep the canvas crisp on hi-DPI screens
+  // init signature pad + handle hi-DPI resize
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     if (!padRef.current) {
-      padRef.current = new SignaturePad(canvas, { minWidth: 0.8, maxWidth: 2 });
+      padRef.current = new SignaturePad(canvas, {
+        minWidth: 0.8,
+        maxWidth: 2.0,
+      });
     }
 
     const resize = () => {
@@ -35,6 +38,7 @@ export default function SignPage() {
       canvas.height = Math.max(1, Math.floor(offsetHeight * ratio));
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.scale(ratio, ratio);
+      // keep the pad clean after resize
       padRef.current?.clear();
     };
 
@@ -43,52 +47,52 @@ export default function SignPage() {
     return () => window.removeEventListener("resize", resize);
   }, []);
 
-  async function canvasToJpegBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-    // Safari sometimes returns null from toBlob; provide a robust fallback.
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.9)
-    );
-    if (blob) return blob;
-
-    // Fallback: dataURL → Blob
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
-    const res = await fetch(dataUrl);
-    return await res.blob();
-  }
-
   async function handleSubmit() {
     try {
-      if (!wo) return alert("Add ?wo=WORKORDER_ID to the URL or enter the Work Order #.");
-      if (!consent) return alert("Please accept the terms.");
+      if (!wo) return alert("Enter a real Work Order # (or use ?wo= in the URL).");
+      if (!consent) return alert("Please agree to the repair terms.");
       if (!padRef.current || padRef.current.isEmpty()) return alert("Please add a signature.");
 
       setSubmitting(true);
 
-      // 1) Get a JPEG blob from the canvas
-      const canvas = canvasRef.current!;
-      const blob = await canvasToJpegBlob(canvas);
+      // 1) Convert canvas → JPEG data URL
+      const dataUrl = canvasRef.current!.toDataURL("image/jpeg", 0.9);
 
-      // 2) Build multipart/form-data (do NOT set Content-Type; browser will add boundary)
+      // 2) Upload image to Vercel Blob (returns public URL)
       const fd = new FormData();
-      fd.set("image", new File([blob], `wo-${wo}-signature.jpg`, { type: "image/jpeg" }));
+      fd.set("dataUrl", dataUrl);
+      fd.set("workorderId", wo);
+      fd.set("name", name || "Customer");
 
-      // 3) POST to our API route
-      const resp = await fetch(`/api/workorders/${encodeURIComponent(wo)}/image`, {
+      const up = await fetch("/api/upload", { method: "POST", body: fd });
+      if (!up.ok) throw new Error(await up.text());
+      const { url } = (await up.json()) as { url: string };
+
+      // 3) Try to add the link as a Work Order note in Lightspeed
+      const noteResp = await fetch(`/api/workorders/${encodeURIComponent(wo)}/note`, {
         method: "POST",
-        body: fd,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, name }),
       });
 
-      const text = await resp.text();
-      if (!resp.ok) {
-        alert("Upload failed: " + text);
-        return;
+      if (noteResp.ok) {
+        alert("Signature saved ✔️ (link added to the Work Order note).");
+      } else {
+        // If LS blocks note edits, still copy the URL so the tech can paste it
+        try {
+          await navigator.clipboard.writeText(url);
+        } catch {}
+        const msg = await noteResp.text().catch(() => "");
+        alert(
+          `Signature saved ✔️\n\nCouldn’t auto-add a note (${noteResp.status}). The link is copied to your clipboard:\n\n${url}\n\nDetails: ${msg}`
+        );
       }
 
-      alert("Signature uploaded to work order.");
       padRef.current.clear();
-    } catch (err: unknown) {
+      setConsent(false);
+    } catch (err: any) {
       console.error(err);
-      alert("Something went wrong submitting the signature.");
+      alert("Upload failed: " + (err?.message ?? err));
     } finally {
       setSubmitting(false);
     }
@@ -113,7 +117,7 @@ export default function SignPage() {
         <input
           value={wo}
           onChange={(e) => setWo(e.target.value)}
-          placeholder="12345"
+          placeholder="129482"
           inputMode="numeric"
           style={{
             width: "100%",
@@ -172,11 +176,7 @@ export default function SignPage() {
         </button>
 
         <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={consent}
-            onChange={(e) => setConsent(e.target.checked)}
-          />
+          <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
           <span>I agree to the repair terms.</span>
         </label>
       </div>
@@ -194,8 +194,13 @@ export default function SignPage() {
           cursor: submitting ? "not-allowed" : "pointer",
         }}
       >
-        {submitting ? "Submitting…" : "Submit Signature"}
+        {submitting ? "Submitting..." : "Submit Signature"}
       </button>
+
+      <p style={{ opacity: 0.6, marginTop: 10, fontSize: 12 }}>
+        Tip: if you still see “WorkorderImage” in an error, your browser is using an old bundle —
+        hard-refresh or open in a new incognito window.
+      </p>
     </main>
   );
 }
