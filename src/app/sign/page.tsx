@@ -7,28 +7,25 @@ export default function SignPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const padRef = useRef<SignaturePad | null>(null);
 
-  const [wo, setWo] = useState("");
-  const [name, setName] = useState("");
-  const [consent, setConsent] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [wo, setWo] = useState<string>("");
+  const [name, setName] = useState<string>("");
+  const [consent, setConsent] = useState<boolean>(false);
+  const [submitting, setSubmitting] = useState<boolean>(false);
 
-  // read ?wo= from URL once
+  // Read ?wo= from URL once
   useEffect(() => {
     const u = new URL(window.location.href);
     const id = u.searchParams.get("wo") ?? "";
     if (id) setWo(id);
   }, []);
 
-  // init signature pad + handle hi-DPI resize
+  // Init signature pad + hi-DPI resize
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     if (!padRef.current) {
-      padRef.current = new SignaturePad(canvas, {
-        minWidth: 0.8,
-        maxWidth: 2.0,
-      });
+      padRef.current = new SignaturePad(canvas, { minWidth: 0.8, maxWidth: 2.0 });
     }
 
     const resize = () => {
@@ -38,7 +35,6 @@ export default function SignPage() {
       canvas.height = Math.max(1, Math.floor(offsetHeight * ratio));
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.scale(ratio, ratio);
-      // keep the pad clean after resize
       padRef.current?.clear();
     };
 
@@ -47,18 +43,26 @@ export default function SignPage() {
     return () => window.removeEventListener("resize", resize);
   }, []);
 
-  async function handleSubmit() {
+  async function handleSubmit(): Promise<void> {
+    if (!wo) {
+      alert("Enter a real Work Order # (or use ?wo= in the URL).");
+      return;
+    }
+    if (!consent) {
+      alert("Please agree to the repair terms.");
+      return;
+    }
+    if (!padRef.current || padRef.current.isEmpty()) {
+      alert("Please add a signature.");
+      return;
+    }
+
+    setSubmitting(true);
     try {
-      if (!wo) return alert("Enter a real Work Order # (or use ?wo= in the URL).");
-      if (!consent) return alert("Please agree to the repair terms.");
-      if (!padRef.current || padRef.current.isEmpty()) return alert("Please add a signature.");
-
-      setSubmitting(true);
-
-      // 1) Convert canvas → JPEG data URL
+      // 1) Canvas → JPEG data URL
       const dataUrl = canvasRef.current!.toDataURL("image/jpeg", 0.9);
 
-      // 2) Upload image to Vercel Blob (returns public URL)
+      // 2) Upload image to Vercel Blob
       const fd = new FormData();
       fd.set("dataUrl", dataUrl);
       fd.set("workorderId", wo);
@@ -66,7 +70,8 @@ export default function SignPage() {
 
       const up = await fetch("/api/upload", { method: "POST", body: fd });
       if (!up.ok) throw new Error(await up.text());
-      const { url } = (await up.json()) as { url: string };
+      const upJson = (await up.json()) as { url: string };
+      const url = upJson.url;
 
       // 3) Try to add the link as a Work Order note in Lightspeed
       const noteResp = await fetch(`/api/workorders/${encodeURIComponent(wo)}/note`, {
@@ -81,7 +86,9 @@ export default function SignPage() {
         // If LS blocks note edits, still copy the URL so the tech can paste it
         try {
           await navigator.clipboard.writeText(url);
-        } catch {}
+        } catch {
+          /* ignore clipboard errors */
+        }
         const msg = await noteResp.text().catch(() => "");
         alert(
           `Signature saved ✔️\n\nCouldn’t auto-add a note (${noteResp.status}). The link is copied to your clipboard:\n\n${url}\n\nDetails: ${msg}`
@@ -90,9 +97,9 @@ export default function SignPage() {
 
       padRef.current.clear();
       setConsent(false);
-    } catch (err: any) {
-      console.error(err);
-      alert("Upload failed: " + (err?.message ?? err));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert("Upload failed: " + message);
     } finally {
       setSubmitting(false);
     }
